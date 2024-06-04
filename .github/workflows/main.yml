@@ -1,0 +1,90 @@
+name: Build TizenBrew Standalone Application and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  TIZEN_STUDIO_VER: 4.5.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repo
+        uses: actions/checkout@v3
+      
+      - name: Set env
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      
+      - name: Install modules and build service
+        working-directory: tizenbrew-app/TizenBrew/service
+        run: |
+          sudo apt install -y expect zip
+          npm install
+          npm install -g @vercel/ncc
+          npm install -g wgt-to-usb
+          ncc build service.js
+          rm -r node_modules
+
+      - name: Download Tizen-Studio
+        run: |
+          curl -o tizen-installer "https://download.tizen.org/sdk/Installer/tizen-studio_${TIZEN_STUDIO_VER}/web-cli_Tizen_Studio_${TIZEN_STUDIO_VER}_ubuntu-64.bin"
+
+      - name: Install Tizen-Studio
+        run: |
+          chmod +x tizen-installer
+          ./tizen-installer --accept-license "${GITHUB_WORKSPACE}/tizen-studio"
+          rm ./tizen-installer
+          echo 'export PATH=$PATH:${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin' >> .bashrc
+          
+      - name: Prepare Tizen Certificate
+        run: |
+          ./tizen-studio/tools/ide/bin/tizen certificate -a TizenBrew -p 1234 -c NZ -s Aukland -ct Aukland -o Tizen -n TizenBrew -e reis@tizentube.live -f tizencert
+          ./tizen-studio/tools/ide/bin/tizen security-profiles add -n TizenBrew -a "${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/tizencert.p12" -p 1234
+          ./tizen-studio/tools/ide/bin/tizen cli-config "profiles.path=${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
+          chmod 755 "./tizen-studio-data/profile/profiles.xml"
+
+      - name: Build
+        working-directory: tizenbrew-app/TizenBrew
+        run: |
+          ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen build-web -e ".*" -e "node_modules/*" -e "package*.json" -e "yarn.lock"
+
+      - name: Prepare for password prompt
+        run: |
+          sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/tizencert.pwd|1234|g" ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
+          sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/tools/certificate-generator/certificates/distributor/tizen-distributor-signer.pwd|tizenpkcs12passfordsigner|g" ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
+          sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
+          
+      - name: Package WGT
+        run: |
+          expect ./package.exp
+
+      - name: Package WGT as USB Demo Package
+        run: |
+          wgt-to-usb tizenbrew-app/TizenBrew/release/TizenBrewStandalone.wgt 
+        
+      - name: Upload Tizen package artifact
+        uses: actions/upload-artifact@v2
+        with:
+            name: app-${{ github.sha }}.wgt
+            path: tizenbrew-app/TizenBrew/release/TizenBrewStandalone.wgt
+
+      - name: Release Build Result
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_VERSION }}
+          files: |
+            tizenbrew-app/TizenBrew/release/TizenBrewStandalone.wgt
+
+      - name: Zip USB Demo Package
+        run: |
+          zip -r tizenbrew-app/TizenBrew/release/TizenBrewStandaloneUSBDemo.zip userwidget/
+
+      - name: Release USB Demo Package
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_VERSION }}
+          files: |
+            tizenbrew-app/TizenBrew/release/TizenBrewStandaloneUSBDemo.zip
